@@ -11,6 +11,8 @@ from aiogram.contrib.middlewares.logging import LoggingMiddleware
 from aiogram.types import InputFile
 import asyncio
 from aiogram.utils.exceptions import MessageNotModified
+import pymorphy2
+
 
 # Установка параметров доступа к API Google Sheets
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']
@@ -29,20 +31,99 @@ dp.middleware.setup(LoggingMiddleware())
 
 # Загрузка spacy модели для русского языка
 nlp = spacy.load("ru_core_news_sm")
+morph = pymorphy2.MorphAnalyzer()
 
-# Функция для извлечения актеров и жанров из текста
+'''
 def extract_actors_and_genres(text):
     actors = []
     genres = []
+    prev_word_was_name = False
 
     doc = nlp(text)
     for token in doc:
-        if token.pos_ == "PROPN":
-            actors.append(token.text)
-        elif token.pos_ == "NOUN":
+        parsed_word = morph.parse(token.text)[0]
+        if parsed_word.tag.POS == 'NOUN' and 'Name' in parsed_word.tag:
+            if prev_word_was_name:
+                actors[-1] += f" {token.text}"
+            else:
+                actors.append(token.text)
+            prev_word_was_name = True
+        elif parsed_word.tag.POS == 'NOUN':
             genres.append(token.text)
+            prev_word_was_name = False
+        else:
+            prev_word_was_name = False
+
+
+
+
+    print("Извлеченные актеры:", actors)
+    print("Извлеченные жанры:", genres)
 
     return actors, genres
+'''
+
+def get_unique_actors():
+    service = build('sheets', 'v4', credentials=creds)
+    sheet = service.spreadsheets()
+    result = sheet.values().get(spreadsheetId=SPREADSHEET_ID, range='Фильмы!A1:I1000').execute()
+    rows = result.get('values', [])
+    actors = set()
+    for row in rows:
+        actors_row = row[5].replace('\xa0', ' ').split(', ')
+        for actor in actors_row:
+            actors.add(actor.strip())
+    return actors
+
+def get_unique_genres():
+    service = build('sheets', 'v4', credentials=creds)
+    sheet = service.spreadsheets()
+    result = sheet.values().get(spreadsheetId=SPREADSHEET_ID, range='Фильмы!A1:I1000').execute()
+    rows = result.get('values', [])
+    genres = set()
+    for row in rows:
+        genres_row = row[4].split(', ')
+        for genre in genres_row:
+            genres.add(normalize_string(genre.strip()))
+    return genres
+
+def extract_actors_and_genres(text):
+    actors = []
+    genres = []
+    unique_actors = get_unique_actors()
+    unique_genres = get_unique_genres()
+
+    # Вывод текста для отладки
+    print("Обрабатываемый текст:", text)
+    print("Уникальные актеры:", unique_actors)
+    print("Уникальные жанры:", unique_genres)
+
+    # Замена специального апострофа на обычный одинарный кавычка
+    text = text.replace("’", "'")
+
+    # Удаление знаков препинания из текста
+    text_without_punctuation = re.sub(r'[^\w\s]', '', text)
+
+    words = text_without_punctuation.split()
+    normalized_words = [normalize_string(word) for word in words]
+
+    for word in normalized_words:
+        if word in unique_genres:
+            genres.append(word)
+
+    # Создайте регулярные выражения для всех уникальных актеров
+    actor_regexes = [re.compile(fr"\b{actor}\b", re.IGNORECASE) for actor in unique_actors]
+
+    # Проверьте, присутствует ли каждый актер в тексте
+    for actor, actor_regex in zip(unique_actors, actor_regexes):
+        if actor_regex.search(text):
+            actors.append(actor)
+
+    print("Извлеченные актеры:", actors)
+    print("Извлеченные жанры:", genres)
+
+    return actors, genres
+
 
 '''
 def search_values(query):
@@ -54,7 +135,18 @@ def search_values(query):
     found_rows = [row for row in rows if query.lower() in row[5].lower()]
     return found_rows
 '''
+
+def normalize_string(string):
+    words = string.split()
+    normalized_words = [morph.parse(word)[0].normal_form for word in words]
+    return " ".join(normalized_words)
+
+
+
 def search_movies_by_actors_and_genres(actors, genres):
+    if not actors and not genres:  # Добавляем проверку на пустые списки
+        return []
+
     service = build('sheets', 'v4', credentials=creds)
     sheet = service.spreadsheets()
     result = sheet.values().get(spreadsheetId=SPREADSHEET_ID, range='Фильмы!A1:I1000').execute()
@@ -62,13 +154,18 @@ def search_movies_by_actors_and_genres(actors, genres):
 
     found_rows = []
     for row in rows:
-        actors_present = all(actor.lower() in row[5].lower() for actor in actors) if actors else True
-        genres_present = all(genre.lower() in row[4].lower() for genre in genres) if genres else True
+        row_actors = row[5]
+        row_genres = row[4]
+        print("Актеры для строки:", row_actors)
+        print("Жанры для строки:", row_genres)
+        actors_present = all(actor.lower() in row_actors.lower() for actor in actors) if actors else True
+        genres_present = all(genre.lower() in row_genres.lower() for genre in genres) if genres else True
 
         if actors_present and genres_present:
             found_rows.append(row)
 
     return found_rows
+
 
 
 # Установка токена и создание бота
@@ -182,7 +279,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 async def send_movies_keyboard(chat_id, movies, user: types.User):
     if not movies:
-        await bot.send_message(chat_id=chat_id, text="Фильмы в таблице Жекича не найдены")
+        await bot.send_message(chat_id=chat_id, text="Фильм не найден в таблице Жекича")
         return
 
     keyboard = InlineKeyboardMarkup(row_width=1)
@@ -219,6 +316,7 @@ async def process_callback_button1(callback_query: types.CallbackQuery):
     if movie:
         base_text = "В"
         final_text = "Выбранный\xA0фильм:"
+        #final_text = "🟩🟩🟩🟩🟩🟩🟩"
         await animated_text(callback_query.from_user.id, callback_query.message.message_id, base_text, final_text)
 
 
