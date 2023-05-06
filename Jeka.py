@@ -63,6 +63,7 @@ def extract_actors_and_genres(text):
     return actors, genres
 '''
 
+
 def get_unique_actors():
     service = build('sheets', 'v4', credentials=creds)
     sheet = service.spreadsheets()
@@ -87,37 +88,40 @@ def get_unique_genres():
             genres.add(normalize_string(genre.strip()))
     return genres
 
+from metaphone import doublemetaphone
+
+def jaccard_similarity(set1, set2):
+    intersection = len(set1.intersection(set2))
+    union = len(set1) + len(set2) - intersection
+    return intersection / union if union != 0 else 0
+
+def preprocess_string(text):
+    text = text.replace("’", " ").replace("'", " ").replace(".", " ").replace("-", " ").replace("ё", "е")
+    text = re.sub(r'\s+', ' ', text)  # удаляем двойные пробелы
+    return text.lower().strip()
+
+
+
 def extract_actors_and_genres(text):
     actors = []
     genres = []
     unique_actors = get_unique_actors()
     unique_genres = get_unique_genres()
 
-    # Вывод текста для отладки
-    print("Обрабатываемый текст:", text)
-    print("Уникальные актеры:", unique_actors)
-    print("Уникальные жанры:", unique_genres)
+    preprocessed_text = preprocess_string(text)
+    preprocessed_unique_actors = [preprocess_string(actor) for actor in unique_actors]
+    preprocessed_unique_genres = [preprocess_string(genre) for genre in unique_genres]
 
-    # Замена специального апострофа на обычный одинарный кавычка
-    text = text.replace("’", "'")
+    actor_regexes = [re.compile(fr"\b{actor}\b", re.IGNORECASE) for actor in preprocessed_unique_actors]
+    genre_regexes = [re.compile(fr"\b{genre}\b", re.IGNORECASE) for genre in preprocessed_unique_genres]
 
-    # Удаление знаков препинания из текста
-    text_without_punctuation = re.sub(r'[^\w\s]', '', text)
-
-    words = text_without_punctuation.split()
-    normalized_words = [normalize_string(word) for word in words]
-
-    for word in normalized_words:
-        if word in unique_genres:
-            genres.append(word)
-
-    # Создайте регулярные выражения для всех уникальных актеров
-    actor_regexes = [re.compile(fr"\b{actor}\b", re.IGNORECASE) for actor in unique_actors]
-
-    # Проверьте, присутствует ли каждый актер в тексте
     for actor, actor_regex in zip(unique_actors, actor_regexes):
-        if actor_regex.search(text):
+        if actor_regex.search(preprocessed_text):
             actors.append(actor)
+
+    for genre, genre_regex in zip(unique_genres, genre_regexes):
+        if genre_regex.search(preprocessed_text):
+            genres.append(genre)
 
     print("Извлеченные актеры:", actors)
     print("Извлеченные жанры:", genres)
