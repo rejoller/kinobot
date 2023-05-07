@@ -12,7 +12,7 @@ from aiogram.types import InputFile
 import asyncio
 from aiogram.utils.exceptions import MessageNotModified
 import pymorphy2
-
+import json
 
 # Установка параметров доступа к API Google Sheets
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']
@@ -87,6 +87,18 @@ def get_unique_genres():
         for genre in genres_row:
             genres.add(normalize_string(genre.strip()))
     return genres
+
+def get_movie_trailer_from_google_sheets(movie_id):
+    service = build('sheets', 'v4', credentials=creds)
+    sheet = service.spreadsheets()
+    result = sheet.values().get(spreadsheetId=SPREADSHEET_ID, range='Фильмы!A1:I1000').execute()
+    rows = result.get('values', [])
+
+    for row in rows:
+        if str(movie_id) == row[3]:  # Сравнение с movie_id в виде строки
+            return row[6]  # Возвращает значение из столбца 'G'
+
+    return None
 
 from metaphone import doublemetaphone
 
@@ -181,9 +193,9 @@ def convert_film_data_keys(film_data):
     for key, value in film_data.items():
         if key == 'filmId':
             key = 'kinopoisk_id'
-        elif key == 'nameRU':
+        elif key == 'nameRu':
             key = 'name_ru'
-        elif key == 'nameEN':
+        elif key == 'nameEn':
             key = 'name_en'
         converted_data[key] = value
     return converted_data
@@ -203,6 +215,34 @@ async def get_movie_frames(api_key, movie_id):
             else:
                 return None
 
+
+from kinopoisk_unofficial.kinopoisk_api_client import KinopoiskApiClient
+from kinopoisk_unofficial.request.films.film_video_request import FilmVideoRequest
+
+api_client = KinopoiskApiClient("cc45654b-e807-432c-8114-debf8fb8565d")
+
+
+'''
+async def get_movie_trailer_url(movie_id):
+    headers = {
+        'accept': 'application/json',
+        'X-API-KEY': 'cc45654b-e807-432c-8114-debf8fb8565d',
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f'https://kinopoiskapiunofficial.tech/api/v2.2/films/{movie_id}/videos', headers=headers) as response:
+            if response.status == 200:
+                data = await response.text()
+                data = json.loads(data)
+                videos = data['items']
+
+                for video in videos:
+                    if video['name'].lower().startswith("трейлер") and "youtube" in video['url']:
+                        return video['url']
+            return None
+
+'''
+
 async def send_movie_frames(chat_id, frames):
     frame_message_ids = []
     for frame in frames:
@@ -214,15 +254,55 @@ async def send_movie_frames(chat_id, frames):
             frame_message_ids.append(sent_frame.message_id)
     return frame_message_ids
 
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith("frames_"))
-async def process_frames_button(callback_query: types.CallbackQuery):
-    index = int(callback_query.data.split("_")[1])
-    movie_id = user_movies[callback_query.from_user.id][index][3]
-    frames = await get_movie_frames("cc45654b-e807-432c-8114-debf8fb8565d", movie_id)
-    if frames:
-        await send_movie_frames(callback_query.from_user.id, frames)
+
+async def send_movie_frames_and_trailer(chat_id, movie_id, index, show_trailer=False):
+    if show_trailer:
+        trailer_url = get_movie_trailer_from_google_sheets(movie_id)
+        if trailer_url:
+            await bot.send_message(chat_id, trailer_url)
+        else:
+            await bot.send_message(chat_id, "Не удалось загрузить трейлер фильма.")
     else:
-        await bot.send_message(callback_query.from_user.id, "Не удалось загрузить кадры фильма.")
+        frames = await get_movie_frames("cc45654b-e807-432c-8114-debf8fb8565d", movie_id)
+        if frames:
+            await send_movie_frames(chat_id, frames)
+        else:
+            await bot.send_message(chat_id, "Не удалось загрузить кадры фильма.")
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith("frames_") or c.data.startswith("trailer_"))
+async def process_frames_and_trailer_button(callback_query: types.CallbackQuery):
+    action, index = callback_query.data.split("_")
+    index = int(index)
+    movie_id = user_movies[callback_query.from_user.id][index][3]
+    show_trailer = action == "trailer"
+    await send_movie_frames_and_trailer(callback_query.from_user.id, movie_id, index, show_trailer)
+
+def get_movie_details_keyboard(index):
+    keyboard = InlineKeyboardMarkup(row_width=2)
+    keyboard.add(InlineKeyboardButton("Показать кадры из фильма", callback_data=f"frames_{index}"))
+    keyboard.add(InlineKeyboardButton("Показать трейлер", callback_data=f"trailer_{index}"))
+    return keyboard
+
+import aiohttp
+
+
+import xml.etree.ElementTree as ET
+
+async def get_kinopoisk_and_imdb_ratings(movie_id):
+    url = f"https://rating.kinopoisk.ru/{movie_id}.xml"
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            if response.status == 200:
+                xml_data = await response.text()
+                root = ET.fromstring(xml_data)
+                kp_rating = round(float(root.find("kp_rating").text), 1)
+                imdb_rating = round(float(root.find("imdb_rating").text), 1)
+                return {"kp": kp_rating, "imdb": imdb_rating}
+            else:
+                return None
+
+
 
 async def search_kinopoisk_movie_by_id(api_key, movie_id):
     async with aiohttp.ClientSession() as session:
@@ -232,25 +312,81 @@ async def search_kinopoisk_movie_by_id(api_key, movie_id):
         ) as response:
             if response.status == 200:
                 film_data = await response.json()
+                print(f"Film Data: {film_data}")
                 film = film_data['data']
+
+                print("Available keys in film['data']:")
+                for key in film.keys():
+                    print(key)
+                external_id = film_data['externalId']
 
                 title = film['nameRu']
                 release_date = film['year']
                 genres = ", ".join([genre['genre'] for genre in film['genres']])
                 description = film['description']
                 cover_url = film['posterUrl']
+                #imdb_rating = film.get('ratingImdb')
+                #kinopoisk_rating = film.get('ratingKinopoisk')
+               # rating_imdb = film_data.get("ratingImdb")
+            #    rating_kinopoisk = film_data.get("ratingKinopoisk")
+             #   rating_kinopoisk_vote_count = film_data.get("ratingKinopoiskVoteCount")
+              #  rating_imdb_vote_count = film_data.get("ratingImdbVoteCount")
+                ratings = await get_kinopoisk_and_imdb_ratings(movie_id)
+
+                if ratings:
+                    print(f"IMDb Rating: {ratings['imdb']}")
+                    print(f"Kinopoisk Rating: {ratings['kp']}")
+                else:
+                    print("No IMDb and Kinopoisk ratings found.")
+
+
+                # Get ratings
+               # ratings = film_data.get('ratings', {})
+                #imdb_rating = ratings.get('ratingImdb')
+                #kinopoisk_rating = ratings.get('ratingKinopoisk')
+
+
+                country = ", ".join([country['country'] for country in film['countries']])
+                #duration_seconds = int(film['filmLength'])
+                #duration = f"{duration_seconds // 3600:02d}:{(duration_seconds % 3600) // 60:02d}:{duration_seconds % 60:02d}"
+                #duration_minutes = int(film['filmLength'])
+                #duration_formatted = f"{duration_minutes} мин. / {duration_minutes // 60:02d}:{duration_minutes % 60:02d}"
+                duration = film['filmLength']
+
+                director = None
+                async with session.get(
+                    f"https://kinopoiskapiunofficial.tech/api/v1/staff?filmId={movie_id}",
+                    headers={"X-API-KEY": api_key},
+                ) as staff_response:
+                    if staff_response.status == 200:
+                        staff_data = await staff_response.json()
+                        for staff_member in staff_data:
+                            if staff_member['professionKey'] == 'DIRECTOR':
+                                director = staff_member['nameRu']
+                                break
+
+                #print("IMDb Rating:", rating_imdb)
+                #print("Kinopoisk Rating:", rating_kinopoisk)
+                #print("Kinopoisk Vote Count:", rating_kinopoisk_vote_count)
+                #print("IMDb Vote Count:", rating_imdb_vote_count)
 
                 kinopoisk_movie = {
                     "title": title,
                     "release_date": release_date,
                     "genres": genres,
                     "description": description,
-                    "cover_url": cover_url
+                    "cover_url": cover_url,
+                    "imdb_rating": ratings['imdb'],
+                    "kinopoisk_rating": ratings['kp'],
+                    "country": country,
+                    "duration": duration,
+                    "director": director
                 }
 
                 return kinopoisk_movie
             else:
                 return None
+
 
 def download_image(url, local_path):
     response = requests.get(url)
@@ -263,6 +399,26 @@ async def send_movie_cover(chat_id, cover_url):
     with open(local_path, 'rb') as cover_file:
         sent_cover = await bot.send_photo(chat_id, InputFile(cover_file))
     return sent_cover.message_id
+
+
+async def send_movie_details(chat_id, movie, index):
+    await send_movie_cover(chat_id, movie['cover_url'])
+    keyboard = get_movie_details_keyboard(index)
+    await bot.send_message(
+        chat_id,
+        f"*{movie['title']} ({movie['release_date']})*\n\n"
+        f"Жанры: {movie['genres']}\n"
+        f"Страна: {movie['country']}\n"
+        f"Режиссер: {movie['director']}\n"
+        f"Продолжительность: {movie['duration']}\n"
+        f"Рейтинг IMDb: {movie['imdb_rating']}\n"
+        f"Рейтинг КиноПоиск: {movie['kinopoisk_rating']}\n\n"
+        f"{movie['description']}",
+        reply_markup=keyboard,
+        parse_mode="Markdown",
+    )
+
+
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -320,17 +476,8 @@ async def process_callback_button1(callback_query: types.CallbackQuery):
     if movie:
         base_text = "В"
         final_text = "Выбранный\xA0фильм:"
-        #final_text = "🟩🟩🟩🟩🟩🟩🟩"
         await animated_text(callback_query.from_user.id, callback_query.message.message_id, base_text, final_text)
-
-
-        await send_movie_cover(callback_query.from_user.id, movie['cover_url'])
-        show_frames_keyboard = InlineKeyboardMarkup().add(InlineKeyboardButton("Показать кадры из фильма", callback_data=f"frames_{index}"))
-        await bot.send_message(
-            callback_query.from_user.id,
-            f"{movie['title']} ({movie['release_date']})\nЖанры: {movie['genres']}\n{movie['description']}",
-            reply_markup=show_frames_keyboard,
-        )
+        await send_movie_details(callback_query.from_user.id, movie, index)
     else:
         await bot.answer_callback_query(callback_query.id, text="Произошла ошибка при поиске фильма на Кинопоиске")
 
