@@ -25,14 +25,14 @@ from aiogram.types import InputFile
 # Установка параметров доступа к API Google Sheets
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']
 SERVICE_ACCOUNT_FILE = '/home/rejoller/mcrbot/credentials.json'
-SPREADSHEET_ID = '1j2NaYPG8QUekY0El0jcRPLE4KYj_yrYfoaZnBqOXbyY'
+SPREADSHEET_ID = ''
 
 creds = service_account.Credentials.from_service_account_file(
     SERVICE_ACCOUNT_FILE, scopes=SCOPES)
 
 user_movies = defaultdict(list)
 
-bot_token = '6029945146:AAGrGlYT4OTJCGTkVSLZbDDdzlccAmqKcUY'
+bot_token = ''
 bot = Bot(token=bot_token)
 dp = Dispatcher(bot)
 dp.middleware.setup(LoggingMiddleware())
